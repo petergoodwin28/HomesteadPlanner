@@ -3,230 +3,325 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import { nanoid } from "nanoid";
-import {
-  Crop,
-  LivestockItem,
-  Meal,
-  LaborEntry,
-  Settings,
-  PantryItem,
-} from "@/lib/types";
+
+/* ------------------------------------------------------
+   Types
+-------------------------------------------------------*/
+
+export interface Crop {
+  id: string;
+  name: string;
+  beds: number;
+  season: string;
+  yieldPerBed: number;
+  unit: string;
+  pricePerUnit: number;
+  caloriesPerUnit: number;
+  
+  // NEW OPTIONAL FIELDS - Add these for enhanced crops
+  daysToHarvest?: number;
+  harvestWindowDays?: number;
+  plantingWindowStart?: string;  // "Mar 15"
+  plantingWindowEnd?: string;    // "Apr 30"
+  waterNeedsPerWeek?: number;    // gallons per bed
+  laborHoursPerBed?: number;     // hours per season
+  storageMethod?: "fresh" | "canned" | "frozen" | "dried" | "root-cellar" | "fermented";
+  shelfLifeDays?: number;
+}
+
+export interface LivestockItem {
+  id: string;
+  name: string;
+  count: number;
+  annualProductionPerUnit: number;
+  pricePerUnit: number;
+  annualCostPerUnit: number;
+  caloriesPerUnit: number;
+  unit: string;
+}
+
+export interface Settings {
+  // Existing fields
+  numberOfBeds: number;
+  bedLengthFeet: number;
+  bedWidthFeet: number;
+  monthlyGroceryBudget: number;
+  laborHourlyValue?: number;
+  eggPricePerDozen: number;
+  honeyPricePerLb: number;
+  feedCostPerChickenMonth: number;
+  hiveMaintenanceAnnual: number;
+
+  // NEW FIELDS
+  climateZone?: "3" | "4" | "5" | "6" | "7" | "8" | "9" | "10";
+  experienceLevel?: "beginner" | "intermediate" | "advanced";
+  seedBudget?: number;
+  
+  // Reality factors
+  spoilageRate?: number; // 0.1 = 10%
+  weatherImpact?: "low" | "moderate" | "high";
+  pestPressure?: "low" | "moderate" | "high";
+}
+
+/* ------------------------------------------------------
+   Labor Types
+-------------------------------------------------------*/
+export interface LaborEntry {
+  id: string;
+  category: string;   // "Garden", "Livestock", "Maintenance", etc
+  task: string;
+  hours: number;
+  date: string;       // ISO string
+}
+
+/* ------------------------------------------------------
+   Bed Types (hybrid layout)
+-------------------------------------------------------*/
+
+export interface GardenBed {
+  id: string;
+  crops: string[];
+  grid: (string | null)[];
+}
+
+function createEmptyGrid() {
+  return new Array(32).fill(null);
+}
+
+/* ------------------------------------------------------
+   Store Interface
+-------------------------------------------------------*/
 
 interface HomesteadState {
+  settings: Settings;
   crops: Crop[];
   livestock: LivestockItem[];
-  meals: Meal[];
+
+  beds: GardenBed[];
+
   labor: LaborEntry[];
-  pantry: PantryItem[];
-  settings: Settings;
 
-  // derived helpers
-  getAnnualGardenValue: () => number;
-  getAnnualGardenCalories: () => number;
-  getAnnualLivestockNetValue: () => number;
-  getAnnualLivestockCalories: () => number;
+  updateSettings: (patch: Partial<Settings>) => void;
+  updateCrop: (id: string, patch: Partial<Crop>) => void;
 
-  // mutators
-  updateSettings: (partial: Partial<Settings>) => void;
+  updateLivestock: (id: string, patch: Partial<LivestockItem>) => void;
+  addLivestock: (item: Omit<LivestockItem, "id">) => void;
+  removeLivestock: (id: string) => void;
 
-  updateCrop: (id: string, partial: Partial<Crop>) => void;
-  updateLivestock: (id: string, partial: Partial<LivestockItem>) => void;
+  syncBedCountWithSettings: (count: number) => void;
+  addBed: () => void;
+  removeBed: (id: string) => void;
 
-  addLaborEntry: (entry: Omit<LaborEntry, "id">) => void;
-  addMeal: (meal: Omit<Meal, "id">) => void;
+  assignCropToBed: (bedId: string, cropId: string) => void;
+  removeCropFromBed: (bedId: string, cropId: string) => void;
 
-  addPantryItem: (item: Omit<PantryItem, "id">) => void;
-  consumePantry: (pantryItemId: string, amount: number) => void;
-  initializePantryFromProduction: () => void;
+  assignCropToCell: (bedId: string, index: number, cropId: string) => void;
+  clearCell: (bedId: string, index: number) => void;
+
+  /* Labor actions */
+  addLabor: (entry: Omit<LaborEntry, "id">) => void;
+  updateLabor: (id: string, patch: Partial<LaborEntry>) => void;
+  removeLabor: (id: string) => void;
+
+  getCropDistribution: () => Record<string, number>;
 }
 
-const initialCrops: Crop[] = [
-  { id: "tomatoes", name: "Tomatoes", season: "Summer", beds: 1, yieldPerBed: 50, unit: "lb", pricePerUnit: 3, caloriesPerUnit: 18 },
-  { id: "lettuce", name: "Lettuce", season: "Spring/Fall", beds: 1, yieldPerBed: 30, unit: "head", pricePerUnit: 3, caloriesPerUnit: 15 },
-  { id: "kale", name: "Kale", season: "Spring/Fall", beds: 1, yieldPerBed: 25, unit: "lb", pricePerUnit: 2.5, caloriesPerUnit: 35 },
-  { id: "greenBeans", name: "Green Beans", season: "Summer", beds: 1, yieldPerBed: 15, unit: "lb", pricePerUnit: 3, caloriesPerUnit: 31 },
-  { id: "carrots", name: "Carrots", season: "Spring/Fall", beds: 1, yieldPerBed: 25, unit: "lb", pricePerUnit: 1.5, caloriesPerUnit: 186 },
-  { id: "herbs", name: "Herbs (dried)", season: "All", beds: 1, yieldPerBed: 2, unit: "lb", pricePerUnit: 50, caloriesPerUnit: 0 },
-  { id: "potatoes", name: "Potatoes", season: "Summer", beds: 1, yieldPerBed: 40, unit: "lb", pricePerUnit: 1.2, caloriesPerUnit: 349 },
-  { id: "radish", name: "Radish", season: "Spring/Fall", beds: 1, yieldPerBed: 20, unit: "lb", pricePerUnit: 1.5, caloriesPerUnit: 16 },
-  { id: "ginger", name: "Ginger", season: "Summer", beds: 1, yieldPerBed: 10, unit: "lb", pricePerUnit: 4, caloriesPerUnit: 80 },
-  { id: "garlic", name: "Garlic", season: "Summer", beds: 1, yieldPerBed: 10, unit: "lb", pricePerUnit: 3.5, caloriesPerUnit: 149 },
-];
-
-const initialLivestock: LivestockItem[] = [
-  {
-    id: "chickens",
-    name: "Chickens (eggs)",
-    count: 6,
-    unit: "egg",
-    annualProductionPerUnit: 0.75 * 365, // eggs per hen per year
-    pricePerUnit: 5 / 12, // $/egg from $5/dozen
-    annualCostPerUnit: 4 * 12, // $4/mo feed x 12
-    caloriesPerUnit: 70,
-  },
-  {
-    id: "bees",
-    name: "Honey bees (hive)",
-    count: 1,
-    unit: "lb honey",
-    annualProductionPerUnit: 40, // lbs per hive
-    pricePerUnit: 8,
-    annualCostPerUnit: 60,
-    caloriesPerUnit: 1390,
-  },
-];
-
-function computeTotalCropYield(crop: Crop, bedsSetting: number): number {
-  // crude scaling vs baseline 2 beds as before
-  const bedFactor = bedsSetting || 2;
-  return crop.yieldPerBed * crop.beds * (bedFactor / 2);
-}
+/* ------------------------------------------------------
+   Store Implementation
+-------------------------------------------------------*/
 
 export const useHomesteadStore = create<HomesteadState>()(
   persist(
     (set, get) => ({
-      crops: initialCrops,
-      livestock: initialLivestock,
-      meals: [],
-      labor: [],
-      pantry: [],
+      /* Defaults */
       settings: {
-        monthlyGroceryBudget: 300,
-        laborHourlyValue: undefined,
-        numberOfBeds: 2,
+        numberOfBeds: 4,
         bedLengthFeet: 8,
         bedWidthFeet: 4,
-        eggPricePerDozen: 5,
+        monthlyGroceryBudget: 400,
+        laborHourlyValue: undefined,
+        eggPricePerDozen: 4,
         honeyPricePerLb: 8,
-        feedCostPerChickenMonth: 4,
-        hiveMaintenanceAnnual: 60,
+        feedCostPerChickenMonth: 3,
+        hiveMaintenanceAnnual: 50,
+        
+        // NEW DEFAULTS
+        climateZone: "7",
+        experienceLevel: "intermediate",
+        seedBudget: 200,
+        spoilageRate: 0.1,
+        weatherImpact: "moderate",
+        pestPressure: "moderate",
       },
 
-      getAnnualGardenValue: () => {
-        const { crops, settings } = get();
-        return crops.reduce((sum, crop) => {
-          const totalYield = computeTotalCropYield(crop, settings.numberOfBeds);
-          return sum + totalYield * crop.pricePerUnit;
-        }, 0);
-      },
+      crops: [],
+      livestock: [
+        {
+          id: "chickens",
+          name: "Chickens",
+          count: 6,
+          annualProductionPerUnit: 260,
+          pricePerUnit: 0.25,
+          annualCostPerUnit: 36,
+          caloriesPerUnit: 70,
+          unit: "egg",
+        },
+        {
+          id: "bees",
+          name: "Honey Bees",
+          count: 1,
+          annualProductionPerUnit: 60,
+          pricePerUnit: 8,
+          annualCostPerUnit: 50,
+          caloriesPerUnit: 1392,
+          unit: "lb honey",
+        },
+      ],
 
-      getAnnualGardenCalories: () => {
-        const { crops, settings } = get();
-        return crops.reduce((sum, crop) => {
-          const totalYield = computeTotalCropYield(crop, settings.numberOfBeds);
-          return sum + totalYield * crop.caloriesPerUnit;
-        }, 0);
-      },
+      beds: Array.from({ length: 4 }).map(() => ({
+        id: nanoid(),
+        crops: [],
+        grid: createEmptyGrid(),
+      })),
 
-      getAnnualLivestockNetValue: () => {
-        const { livestock } = get();
-        return livestock.reduce((sum, item) => {
-          const annualProduction = item.annualProductionPerUnit * item.count;
-          const value = annualProduction * item.pricePerUnit;
-          const cost = item.annualCostPerUnit * item.count;
-          return sum + (value - cost);
-        }, 0);
-      },
+      /* NEW LABOR MODULE */
+      labor: [],
 
-      getAnnualLivestockCalories: () => {
-        const { livestock } = get();
-        return livestock.reduce((sum, item) => {
-          const annualProduction = item.annualProductionPerUnit * item.count;
-          return sum + annualProduction * item.caloriesPerUnit;
-        }, 0);
-      },
+      /* Settings */
+      updateSettings: (patch) =>
+        set((state) => ({ settings: { ...state.settings, ...patch } })),
 
-      updateSettings: (partial) =>
+      updateCrop: (id, patch) =>
         set((state) => ({
-          settings: { ...state.settings, ...partial },
-        })),
-
-      updateCrop: (id, partial) =>
-        set((state) => ({
-          crops: state.crops.map((crop) =>
-            crop.id === id ? { ...crop, ...partial } : crop
+          crops: state.crops.map((c) =>
+            c.id === id ? { ...c, ...patch } : c
           ),
         })),
 
-      updateLivestock: (id, partial) =>
+      updateLivestock: (id, patch) =>
         set((state) => ({
-          livestock: state.livestock.map((item) =>
-            item.id === id ? { ...item, ...partial } : item
+          livestock: state.livestock.map((l) =>
+            l.id === id ? { ...l, ...patch } : l
           ),
         })),
 
-      addLaborEntry: (entry) =>
+      addLivestock: (item) =>
+        set((state) => ({
+          livestock: [...state.livestock, { ...item, id: nanoid() }],
+        })),
+
+      removeLivestock: (id) =>
+        set((state) => ({
+          livestock: state.livestock.filter((l) => l.id !== id),
+        })),
+
+      /* Garden beds */
+      syncBedCountWithSettings: (count) =>
+        set((state) => {
+          const current = state.beds.length;
+          if (count > current) {
+            const extra = Array.from({ length: count - current }).map(() => ({
+              id: nanoid(),
+              crops: [],
+              grid: createEmptyGrid(),
+            }));
+            return { beds: [...state.beds, ...extra] };
+          }
+          if (count < current) {
+            return { beds: state.beds.slice(0, count) };
+          }
+          return {};
+        }),
+
+      addBed: () =>
+        set((state) => ({
+          beds: [
+            ...state.beds,
+            { id: nanoid(), crops: [], grid: createEmptyGrid() },
+          ],
+        })),
+
+      removeBed: (id) =>
+        set((state) => ({
+          beds: state.beds.filter((b) => b.id !== id),
+        })),
+
+      assignCropToBed: (bedId, cropId) =>
+        set((state) => ({
+          beds: state.beds.map((b) =>
+            b.id === bedId && !b.crops.includes(cropId)
+              ? { ...b, crops: [...b.crops, cropId] }
+              : b
+          ),
+        })),
+
+      removeCropFromBed: (bedId, cropId) =>
+        set((state) => ({
+          beds: state.beds.map((b) =>
+            b.id === bedId
+              ? { ...b, crops: b.crops.filter((c) => c !== cropId) }
+              : b
+          ),
+        })),
+
+      assignCropToCell: (bedId, index, cropId) =>
+        set((state) => ({
+          beds: state.beds.map((b) =>
+            b.id === bedId
+              ? {
+                  ...b,
+                  grid: b.grid.map((cell, i) =>
+                    i === index ? cropId : cell
+                  ),
+                }
+              : b
+          ),
+        })),
+
+      clearCell: (bedId, index) =>
+        set((state) => ({
+          beds: state.beds.map((b) =>
+            b.id === bedId
+              ? {
+                  ...b,
+                  grid: b.grid.map((cell, i) =>
+                    i === index ? null : cell
+                  ),
+                }
+              : b
+          ),
+        })),
+
+      /* LABOR ACTIONS */
+      addLabor: (entry) =>
         set((state) => ({
           labor: [...state.labor, { ...entry, id: nanoid() }],
         })),
 
-      addMeal: (meal) =>
+      updateLabor: (id, patch) =>
         set((state) => ({
-          meals: [...state.meals, { ...meal, id: nanoid() }],
+          labor: state.labor.map((e) =>
+            e.id === id ? { ...e, ...patch } : e
+          ),
         })),
 
-      addPantryItem: (item) =>
+      removeLabor: (id) =>
         set((state) => ({
-          pantry: [...state.pantry, { ...item, id: nanoid() }],
+          labor: state.labor.filter((e) => e.id !== id),
         })),
 
-      consumePantry: (pantryItemId, amount) =>
-        set((state) => ({
-          pantry: state.pantry
-            .map((item) =>
-              item.id === pantryItemId
-                ? { ...item, quantity: Math.max(item.quantity - amount, 0) }
-                : item
-            )
-            .filter((item) => item.quantity > 0),
-        })),
-
-      initializePantryFromProduction: () => {
-        const { crops, livestock, settings } = get();
-
-        const cropItems: PantryItem[] = crops.map((crop) => {
-          const totalYield = computeTotalCropYield(crop, settings.numberOfBeds);
-          return {
-            id: nanoid(),
-            name: crop.name,
-            source: "garden",
-            unit: crop.unit,
-            quantity: totalYield,
-            caloriesPerUnit: crop.caloriesPerUnit,
-            costPerUnit: crop.pricePerUnit,
-            linkedCropId: crop.id,
-          };
-        });
-
-        const livestockItems: PantryItem[] = livestock.map((item) => {
-          const annualProduction = item.annualProductionPerUnit * item.count;
-          return {
-            id: nanoid(),
-            name: item.name,
-            source: "livestock",
-            unit: item.unit,
-            quantity: annualProduction,
-            caloriesPerUnit: item.caloriesPerUnit,
-            costPerUnit: item.pricePerUnit,
-            linkedLivestockId: item.id,
-          };
-        });
-
-        set(() => ({
-          pantry: [...cropItems, ...livestockItems],
-        }));
+      /* Distribution selector */
+      getCropDistribution: () => {
+        const { beds } = get();
+        const dist: Record<string, number> = {};
+        beds.forEach((bed) =>
+          bed.grid.forEach((cell) => {
+            if (cell) dist[cell] = (dist[cell] || 0) + 1;
+          })
+        );
+        return dist;
       },
     }),
-    {
-      name: "homestead-planner-state",
-      partialize: (state) => ({
-        crops: state.crops,
-        livestock: state.livestock,
-        pantry: state.pantry,
-        meals: state.meals,
-        settings: state.settings,
-        labor: state.labor,
-      }),
-    }
+    { name: "homestead-store" }
   )
 );
